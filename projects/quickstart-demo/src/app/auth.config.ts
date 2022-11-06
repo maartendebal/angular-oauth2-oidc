@@ -1,11 +1,13 @@
 import { AuthConfig } from 'angular-oauth2-oidc';
 
 export const authCodeFlowConfig: AuthConfig = {
-  issuer: 'https://idsvr4.azurewebsites.net',
-  redirectUri: window.location.origin + '/index.html',
-  clientId: 'spa',
+  issuer: 'https://idpdev.booku.be',
+  clientId: 'booku_angular_localhost',
+  scope: 'openid profile offline_access',
   responseType: 'code',
-  scope: 'openid profile email offline_access api',
+  oidc: true,
+  timeoutFactor: 0.9,
+  redirectUri: 'http://localhost:4200/authenticate/signin-oidc',
   showDebugInformation: true,
-  timeoutFactor: 0.01,
+  dummyClientSecret: '49C1A7E1-0C79-4A89-A3D6-A37998FB86B0',
 };

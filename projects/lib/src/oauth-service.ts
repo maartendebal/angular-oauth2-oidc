@@ -1,52 +1,51 @@
-import { Injectable, NgZone, Optional, OnDestroy, Inject } from '@angular/core';
+import { Inject, Injectable, NgZone, OnDestroy, Optional } from '@angular/core';
 import {
   HttpClient,
+  HttpErrorResponse,
   HttpHeaders,
   HttpParams,
-  HttpErrorResponse,
 } from '@angular/common/http';
 import {
+  combineLatest,
+  from,
   Observable,
-  Subject,
-  Subscription,
   of,
   race,
-  from,
-  combineLatest,
+  Subject,
+  Subscription,
   throwError,
 } from 'rxjs';
 import {
-  filter,
+  catchError,
+  debounceTime,
   delay,
+  filter,
   first,
-  tap,
   map,
   switchMap,
-  debounceTime,
-  catchError,
+  tap,
 } from 'rxjs/operators';
 import { DOCUMENT } from '@angular/common';
 import { DateTimeProvider } from './date-time-provider';
-
 import {
   ValidationHandler,
   ValidationParams,
 } from './token-validation/validation-handler';
 import { UrlHelperService } from './url-helper.service';
 import {
+  OAuthErrorEvent,
   OAuthEvent,
   OAuthInfoEvent,
-  OAuthErrorEvent,
   OAuthSuccessEvent,
 } from './events';
 import {
-  OAuthLogger,
-  OAuthStorage,
   LoginOptions,
-  ParsedIdToken,
+  OAuthLogger,
+  OAuthSecureStorage,
+  OAuthStorage,
   OidcDiscoveryDoc,
+  ParsedIdToken,
   TokenResponse,
-  UserInfo,
 } from './types';
 import { b64DecodeUnicode, base64UrlEncode } from './base64-helper';
 import { AuthConfig } from './auth.config';
@@ -99,6 +98,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   protected silentRefreshPostMessageEventListener: EventListener;
   protected grantTypesSupported: Array<string> = [];
   protected _storage: OAuthStorage;
+  protected _secureStorage: OAuthSecureStorage;
   protected accessTokenTimeoutSubscription: Subscription;
   protected idTokenTimeoutSubscription: Subscription;
   protected tokenReceivedSubscription: Subscription;
@@ -116,6 +116,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
     protected ngZone: NgZone,
     protected http: HttpClient,
     @Optional() storage: OAuthStorage,
+    @Optional() secureStorage: OAuthSecureStorage,
     @Optional() tokenValidationHandler: ValidationHandler,
     @Optional() protected config: AuthConfig,
     protected urlHelper: UrlHelperService,
@@ -149,7 +150,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
 
     try {
       if (storage) {
-        this.setStorage(storage);
+        this.setStorage(storage, secureStorage);
       } else if (typeof sessionStorage !== 'undefined') {
         this.setStorage(sessionStorage);
       }
@@ -161,25 +162,19 @@ export class OAuthService extends AuthConfig implements OnDestroy {
       );
     }
 
-    // in IE, sessionStorage does not always survive a redirect
-    if (this.checkLocalStorageAccessable()) {
-      const ua = window?.navigator?.userAgent;
-      const msie = ua?.includes('MSIE ') || ua?.includes('Trident');
-
-      if (msie) {
-        this.saveNoncesInLocalStorage = true;
-      }
-    }
-
     this.setupRefreshTimer();
   }
 
   private checkLocalStorageAccessable() {
-    if (typeof window === 'undefined') return false;
+    if (typeof window === 'undefined') {
+      return false;
+    }
 
     const test = 'test';
     try {
-      if (typeof window['localStorage'] === 'undefined') return false;
+      if (typeof window['localStorage'] === 'undefined') {
+        return false;
+      }
 
       localStorage.setItem(test, test);
       localStorage.removeItem(test);
@@ -263,7 +258,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
       .subscribe((_) => {
         if (shouldRunSilentRefresh) {
           // this.silentRefresh(params, noPrompt).catch(_ => {
-          this.refreshInternal(params, noPrompt).catch((_) => {
+          this.refreshInternal(params, noPrompt).catch(() => {
             this.debug('Automatic silent refresh did not work');
           });
         }
@@ -290,7 +285,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
    *
    * @param options LoginOptions to pass through to `tryLogin(...)`
    */
-  public loadDiscoveryDocumentAndTryLogin(
+  public async loadDiscoveryDocumentAndTryLogin(
     options: LoginOptions = null
   ): Promise<boolean> {
     return this.loadDiscoveryDocument().then((doc) => {
@@ -405,8 +400,9 @@ export class OAuthService extends AuthConfig implements OnDestroy {
       this.setupExpirationTimers();
     }
 
-    if (this.tokenReceivedSubscription)
+    if (this.tokenReceivedSubscription) {
       this.tokenReceivedSubscription.unsubscribe();
+    }
 
     this.tokenReceivedSubscription = this.events
       .pipe(filter((e) => e.type === 'token_received'))
@@ -510,8 +506,13 @@ export class OAuthService extends AuthConfig implements OnDestroy {
    *
    * @param storage
    */
-  public setStorage(storage: OAuthStorage): void {
+  public setStorage(
+    storage: OAuthStorage,
+    secureStorage?: OAuthSecureStorage
+  ): void {
+    console.log('--------------------- STORAGE SET ', storage, secureStorage);
     this._storage = storage;
+    this._secureStorage = secureStorage;
     this.configChanged();
   }
 
@@ -586,14 +587,12 @@ export class OAuthService extends AuthConfig implements OnDestroy {
               );
               this.eventsSubject.next(event);
               resolve(event);
-              return;
             })
             .catch((err) => {
               this.eventsSubject.next(
                 new OAuthErrorEvent('discovery_document_load_error', err)
               );
               reject(err);
-              return;
             });
         },
         (err) => {
@@ -747,69 +746,72 @@ export class OAuthService extends AuthConfig implements OnDestroy {
     }
 
     return new Promise((resolve, reject) => {
-      const headers = new HttpHeaders().set(
-        'Authorization',
-        'Bearer ' + this.getAccessToken()
-      );
-
-      this.http
-        .get(this.userinfoEndpoint, {
-          headers,
-          observe: 'response',
-          responseType: 'text',
-        })
-        .subscribe(
-          (response) => {
-            this.debug('userinfo received', JSON.stringify(response));
-            if (
-              response.headers
-                .get('content-type')
-                .startsWith('application/json')
-            ) {
-              let info = JSON.parse(response.body);
-              const existingClaims = this.getIdentityClaims() || {};
-
-              if (!this.skipSubjectCheck) {
-                if (
-                  this.oidc &&
-                  (!existingClaims['sub'] || info.sub !== existingClaims['sub'])
-                ) {
-                  const err =
-                    'if property oidc is true, the received user-id (sub) has to be the user-id ' +
-                    'of the user that has logged in with oidc.\n' +
-                    'if you are not using oidc but just oauth2 password flow set oidc to false';
-
-                  reject(err);
-                  return;
-                }
-              }
-
-              info = Object.assign({}, existingClaims, info);
-
-              this._storage.setItem(
-                'id_token_claims_obj',
-                JSON.stringify(info)
-              );
-              this.eventsSubject.next(
-                new OAuthSuccessEvent('user_profile_loaded')
-              );
-              resolve({ info });
-            } else {
-              this.debug('userinfo is not JSON, treating it as JWE/JWS');
-              this.eventsSubject.next(
-                new OAuthSuccessEvent('user_profile_loaded')
-              );
-              resolve(JSON.parse(response.body));
-            }
-          },
-          (err) => {
-            this.logger.error('error loading user info', err);
-            this.eventsSubject.next(
-              new OAuthErrorEvent('user_profile_load_error', err)
-            );
-            reject(err);
-          }
+      this.getAccessToken().then((accessToken) => {
+        const headers = new HttpHeaders().set(
+          'Authorization',
+          'Bearer ' + accessToken
         );
+
+        this.http
+          .get(this.userinfoEndpoint, {
+            headers,
+            observe: 'response',
+            responseType: 'text',
+          })
+          .subscribe(
+            (response) => {
+              this.debug('userinfo received', JSON.stringify(response));
+              if (
+                response.headers
+                  .get('content-type')
+                  .startsWith('application/json')
+              ) {
+                let info = JSON.parse(response.body);
+                const existingClaims = this.getIdentityClaims() || {};
+
+                if (!this.skipSubjectCheck) {
+                  if (
+                    this.oidc &&
+                    (!existingClaims['sub'] ||
+                      info.sub !== existingClaims['sub'])
+                  ) {
+                    const err =
+                      'if property oidc is true, the received user-id (sub) has to be the user-id ' +
+                      'of the user that has logged in with oidc.\n' +
+                      'if you are not using oidc but just oauth2 password flow set oidc to false';
+
+                    reject(err);
+                    return;
+                  }
+                }
+
+                info = Object.assign({}, existingClaims, info);
+
+                this._storage.setItem(
+                  'id_token_claims_obj',
+                  JSON.stringify(info)
+                );
+                this.eventsSubject.next(
+                  new OAuthSuccessEvent('user_profile_loaded')
+                );
+                resolve({ info });
+              } else {
+                this.debug('userinfo is not JSON, treating it as JWE/JWS');
+                this.eventsSubject.next(
+                  new OAuthSuccessEvent('user_profile_loaded')
+                );
+                resolve(JSON.parse(response.body));
+              }
+            },
+            (err) => {
+              this.logger.error('error loading user info', err);
+              this.eventsSubject.next(
+                new OAuthErrorEvent('user_profile_load_error', err)
+              );
+              reject(err);
+            }
+          );
+      });
     });
   }
 
@@ -931,6 +933,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
       'tokenEndpoint'
     );
     return new Promise((resolve, reject) => {
+      // TODO get refresh token from secure storage if secure storage is set.
       let params = new HttpParams({ encoder: new WebHttpUrlEncodingCodec() })
         .set('grant_type', 'refresh_token')
         .set('scope', this.scope)
@@ -1049,78 +1052,80 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   ): Promise<OAuthEvent> {
     const claims: object = this.getIdentityClaims() || {};
 
-    if (this.useIdTokenHintForSilentRefresh && this.hasValidIdToken()) {
-      params['id_token_hint'] = this.getIdToken();
-    }
-
-    if (!this.validateUrlForHttps(this.loginUrl)) {
-      throw new Error(
-        "loginUrl  must use HTTPS (with TLS), or config value for property 'requireHttps' must be set to 'false' and allow HTTP (without TLS)."
-      );
-    }
-
-    if (typeof this.document === 'undefined') {
-      throw new Error('silent refresh is not supported on this platform');
-    }
-
-    const existingIframe = this.document.getElementById(
-      this.silentRefreshIFrameName
-    );
-
-    if (existingIframe) {
-      this.document.body.removeChild(existingIframe);
-    }
-
-    this.silentRefreshSubject = claims['sub'];
-
-    const iframe = this.document.createElement('iframe');
-    iframe.id = this.silentRefreshIFrameName;
-
-    this.setupSilentRefreshEventListener();
-
-    const redirectUri = this.silentRefreshRedirectUri || this.redirectUri;
-    this.createLoginUrl(null, null, redirectUri, noPrompt, params).then(
-      (url) => {
-        iframe.setAttribute('src', url);
-
-        if (!this.silentRefreshShowIFrame) {
-          iframe.style['display'] = 'none';
-        }
-        this.document.body.appendChild(iframe);
+    return this.getIdToken().then((idToken) => {
+      if (this.useIdTokenHintForSilentRefresh && this.hasValidIdToken()) {
+        params['id_token_hint'] = idToken;
       }
-    );
 
-    const errors = this.events.pipe(
-      filter((e) => e instanceof OAuthErrorEvent),
-      first()
-    );
-    const success = this.events.pipe(
-      filter((e) => e.type === 'token_received'),
-      first()
-    );
-    const timeout = of(
-      new OAuthErrorEvent('silent_refresh_timeout', null)
-    ).pipe(delay(this.silentRefreshTimeout));
+      if (!this.validateUrlForHttps(this.loginUrl)) {
+        throw new Error(
+          "loginUrl  must use HTTPS (with TLS), or config value for property 'requireHttps' must be set to 'false' and allow HTTP (without TLS)."
+        );
+      }
 
-    return race([errors, success, timeout])
-      .pipe(
-        map((e) => {
-          if (e instanceof OAuthErrorEvent) {
-            if (e.type === 'silent_refresh_timeout') {
-              this.eventsSubject.next(e);
-            } else {
-              e = new OAuthErrorEvent('silent_refresh_error', e);
+      if (typeof this.document === 'undefined') {
+        throw new Error('silent refresh is not supported on this platform');
+      }
+
+      const existingIframe = this.document.getElementById(
+        this.silentRefreshIFrameName
+      );
+
+      if (existingIframe) {
+        this.document.body.removeChild(existingIframe);
+      }
+
+      this.silentRefreshSubject = claims['sub'];
+
+      const iframe = this.document.createElement('iframe');
+      iframe.id = this.silentRefreshIFrameName;
+
+      this.setupSilentRefreshEventListener();
+
+      const redirectUri = this.silentRefreshRedirectUri || this.redirectUri;
+      this.createLoginUrl(null, null, redirectUri, noPrompt, params).then(
+        (url) => {
+          iframe.setAttribute('src', url);
+
+          if (!this.silentRefreshShowIFrame) {
+            iframe.style['display'] = 'none';
+          }
+          this.document.body.appendChild(iframe);
+        }
+      );
+
+      const errors = this.events.pipe(
+        filter((e) => e instanceof OAuthErrorEvent),
+        first()
+      );
+      const success = this.events.pipe(
+        filter((e) => e.type === 'token_received'),
+        first()
+      );
+      const timeout = of(
+        new OAuthErrorEvent('silent_refresh_timeout', null)
+      ).pipe(delay(this.silentRefreshTimeout));
+
+      return race([errors, success, timeout])
+        .pipe(
+          map((e) => {
+            if (e instanceof OAuthErrorEvent) {
+              if (e.type === 'silent_refresh_timeout') {
+                this.eventsSubject.next(e);
+              } else {
+                e = new OAuthErrorEvent('silent_refresh_error', e);
+                this.eventsSubject.next(e);
+              }
+              throw e;
+            } else if (e.type === 'token_received') {
+              e = new OAuthSuccessEvent('silently_refreshed');
               this.eventsSubject.next(e);
             }
-            throw e;
-          } else if (e.type === 'token_received') {
-            e = new OAuthSuccessEvent('silently_refreshed');
-            this.eventsSubject.next(e);
-          }
-          return e;
-        })
-      )
-      .toPromise();
+            return e;
+          })
+        )
+        .toPromise();
+    });
   }
 
   /**
@@ -1654,13 +1659,17 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   protected callOnTokenReceivedIfExists(options: LoginOptions): void {
     const that = this;
     if (options.onTokenReceived) {
-      const tokenParams = {
-        idClaims: that.getIdentityClaims(),
-        idToken: that.getIdToken(),
-        accessToken: that.getAccessToken(),
-        state: that.state,
-      };
-      options.onTokenReceived(tokenParams);
+      Promise.all([this.getIdToken(), this.getAccessToken()]).then(
+        ([idToken, accessToken]) => {
+          const tokenParams = {
+            idClaims: that.getIdentityClaims(),
+            idToken: idToken,
+            accessToken: accessToken,
+            state: that.state,
+          };
+          options.onTokenReceived(tokenParams);
+        }
+      );
     }
   }
 
@@ -1671,7 +1680,8 @@ export class OAuthService extends AuthConfig implements OnDestroy {
     grantedScopes: String,
     customParameters?: Map<string, string>
   ): void {
-    this._storage.setItem('access_token', accessToken);
+    this.storeInSecureStorageIfPossible('access_token', accessToken);
+
     if (grantedScopes && !Array.isArray(grantedScopes)) {
       this._storage.setItem(
         'granted_scopes',
@@ -1693,7 +1703,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
     }
 
     if (refreshToken) {
-      this._storage.setItem('refresh_token', refreshToken);
+      this.storeInSecureStorageIfPossible('refresh_token', refreshToken);
     }
     if (customParameters) {
       customParameters.forEach((value: string, key: string) => {
@@ -1702,11 +1712,19 @@ export class OAuthService extends AuthConfig implements OnDestroy {
     }
   }
 
+  protected storeInSecureStorageIfPossible(key: string, data: string) {
+    if (this._secureStorage) {
+      this._secureStorage.setItem(key, data);
+    } else {
+      this._storage.setItem(key, data);
+    }
+  }
+
   /**
    * Delegates to tryLoginImplicitFlow for the sake of competability
    * @param options Optional options.
    */
-  public tryLogin(options: LoginOptions = null): Promise<boolean> {
+  public async tryLogin(options: LoginOptions = null): Promise<boolean> {
     if (this.config.responseType === 'code') {
       return this.tryLoginCodeFlow(options).then((_) => true);
     } else {
@@ -2123,7 +2141,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   }
 
   protected storeIdToken(idToken: ParsedIdToken): void {
-    this._storage.setItem('id_token', idToken.idToken);
+    this.storeInSecureStorageIfPossible('id_token', idToken.idToken);
     this._storage.setItem('id_token_claims_obj', idToken.idTokenClaimsJson);
     this._storage.setItem('id_token_expires_at', '' + idToken.idTokenExpiresAt);
     this._storage.setItem(
@@ -2317,6 +2335,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
           idTokenExpiresAt: expiresAtMSec,
         };
         if (atHashCheckEnabled) {
+          // tslint:disable-next-line:no-shadowed-variable
           return this.checkAtHash(validationParams).then((atHashValid) => {
             if (this.requestAccessToken && !atHashValid) {
               const err = 'Wrong at_hash';
@@ -2358,8 +2377,12 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   /**
    * Returns the current id_token.
    */
-  public getIdToken(): string {
-    return this._storage ? this._storage.getItem('id_token') : null;
+  public getIdToken(): Promise<string> {
+    return this._secureStorage
+      ? this._secureStorage.getItem('id_token')
+      : this._storage
+      ? new Promise(() => this._storage.getItem('id_token'))
+      : new Promise(() => null);
   }
 
   protected padBase64(base64data): string {
@@ -2372,12 +2395,20 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   /**
    * Returns the current access_token.
    */
-  public getAccessToken(): string {
-    return this._storage ? this._storage.getItem('access_token') : null;
+  public getAccessToken(): Promise<string> {
+    return this._secureStorage
+      ? this._secureStorage.getItem('access_token')
+      : this._storage
+      ? new Promise(() => this._storage.getItem('access_token'))
+      : new Promise(() => null);
   }
 
-  public getRefreshToken(): string {
-    return this._storage ? this._storage.getItem('refresh_token') : null;
+  public getRefreshToken(): Promise<string> {
+    return this._secureStorage
+      ? this._secureStorage.getItem('refresh_token')
+      : this._storage
+      ? new Promise(() => this._storage.getItem('refresh_token'))
+      : new Promise(() => null);
   }
 
   /**
@@ -2385,18 +2416,18 @@ export class OAuthService extends AuthConfig implements OnDestroy {
    * as milliseconds since 1970.
    */
   public getAccessTokenExpiration(): number {
-    if (!this._storage.getItem('expires_at')) {
+    if (!this._storage?.getItem('expires_at')) {
       return null;
     }
     return parseInt(this._storage.getItem('expires_at'), 10);
   }
 
   protected getAccessTokenStoredAt(): number {
-    return parseInt(this._storage.getItem('access_token_stored_at'), 10);
+    return parseInt(this._storage?.getItem('access_token_stored_at'), 10);
   }
 
   protected getIdTokenStoredAt(): number {
-    return parseInt(this._storage.getItem('id_token_stored_at'), 10);
+    return parseInt(this._storage?.getItem('id_token_stored_at'), 10);
   }
 
   /**
@@ -2404,7 +2435,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
    * as milliseconds since 1970.
    */
   public getIdTokenExpiration(): number {
-    if (!this._storage.getItem('id_token_expires_at')) {
+    if (!this._storage?.getItem('id_token_expires_at')) {
       return null;
     }
 
@@ -2414,41 +2445,46 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   /**
    * Checkes, whether there is a valid access_token.
    */
-  public hasValidAccessToken(): boolean {
-    if (this.getAccessToken()) {
-      const expiresAt = this._storage.getItem('expires_at');
-      const now = this.dateTimeService.new();
-      if (
-        expiresAt &&
-        parseInt(expiresAt, 10) < now.getTime() - this.getClockSkewInMsec()
-      ) {
-        return false;
+  public hasValidAccessToken(): Promise<boolean> {
+    return this.getAccessToken().then((accessToken) => {
+      if (accessToken) {
+        const expiresAt = this._storage.getItem('expires_at');
+        const now = this.dateTimeService.new();
+
+        if (
+          expiresAt &&
+          parseInt(expiresAt, 10) < now.getTime() - this.getClockSkewInMsec()
+        ) {
+          return false;
+        }
+
+        return true;
       }
 
-      return true;
-    }
-
-    return false;
+      return false;
+    });
   }
 
   /**
    * Checks whether there is a valid id_token.
    */
-  public hasValidIdToken(): boolean {
-    if (this.getIdToken()) {
-      const expiresAt = this._storage.getItem('id_token_expires_at');
-      const now = this.dateTimeService.new();
-      if (
-        expiresAt &&
-        parseInt(expiresAt, 10) < now.getTime() - this.getClockSkewInMsec()
-      ) {
-        return false;
+  public hasValidIdToken(): Promise<boolean> {
+    return this.getIdToken().then((idToken) => {
+      if (idToken) {
+        const expiresAt = this._storage.getItem('id_token_expires_at');
+        const now = this.dateTimeService.new();
+        if (
+          expiresAt &&
+          parseInt(expiresAt, 10) < now.getTime() - this.getClockSkewInMsec()
+        ) {
+          return false;
+        }
+
+        return true;
       }
 
-      return true;
-    }
-
-    return false;
+      return false;
+    });
   }
 
   /**
@@ -2467,8 +2503,8 @@ export class OAuthService extends AuthConfig implements OnDestroy {
    * Returns the auth-header that can be used
    * to transmit the access_token to a service
    */
-  public authorizationHeader(): string {
-    return 'Bearer ' + this.getAccessToken();
+  public authorizationHeader(): Promise<string> {
+    return this.getAccessToken().then((accessToken) => 'Bearer ' + accessToken);
   }
 
   /**
@@ -2479,8 +2515,11 @@ export class OAuthService extends AuthConfig implements OnDestroy {
    * @param state
    */
   public logOut(): void;
+  // tslint:disable-next-line:unified-signatures
   public logOut(customParameters: boolean | object): void;
+  // tslint:disable-next-line:unified-signatures
   public logOut(noRedirectToLogoutUrl: boolean): void;
+  // tslint:disable-next-line:unified-signatures
   public logOut(noRedirectToLogoutUrl: boolean, state: string): void;
   public logOut(customParameters: boolean | object = {}, state = ''): void {
     let noRedirectToLogoutUrl = false;
@@ -2489,7 +2528,6 @@ export class OAuthService extends AuthConfig implements OnDestroy {
       customParameters = {};
     }
 
-    const id_token = this.getIdToken();
     this._storage.removeItem('access_token');
     this._storage.removeItem('id_token');
     this._storage.removeItem('refresh_token');
@@ -2525,52 +2563,57 @@ export class OAuthService extends AuthConfig implements OnDestroy {
       return;
     }
 
-    if (!id_token && !this.postLogoutRedirectUri) {
-      return;
-    }
-
-    let logoutUrl: string;
-
-    if (!this.validateUrlForHttps(this.logoutUrl)) {
-      throw new Error(
-        "logoutUrl  must use HTTPS (with TLS), or config value for property 'requireHttps' must be set to 'false' and allow HTTP (without TLS)."
-      );
-    }
-
-    // For backward compatibility
-    if (this.logoutUrl.indexOf('{{') > -1) {
-      logoutUrl = this.logoutUrl
-        .replace(/\{\{id_token\}\}/, encodeURIComponent(id_token))
-        .replace(/\{\{client_id\}\}/, encodeURIComponent(this.clientId));
-    } else {
-      let params = new HttpParams({ encoder: new WebHttpUrlEncodingCodec() });
-
-      if (id_token) {
-        params = params.set('id_token_hint', id_token);
+    this.getIdToken().then((id_token) => {
+      if (!id_token && !this.postLogoutRedirectUri) {
+        return;
       }
 
-      const postLogoutUrl =
-        this.postLogoutRedirectUri ||
-        (this.redirectUriAsPostLogoutRedirectUriFallback && this.redirectUri) ||
-        '';
-      if (postLogoutUrl) {
-        params = params.set('post_logout_redirect_uri', postLogoutUrl);
+      let logoutUrl: string;
 
-        if (state) {
-          params = params.set('state', state);
+      if (!this.validateUrlForHttps(this.logoutUrl)) {
+        throw new Error(
+          "logoutUrl  must use HTTPS (with TLS), or config value for property 'requireHttps' must be set to 'false' and allow HTTP (without TLS)."
+        );
+      }
+
+      // For backward compatibility
+      if (this.logoutUrl.indexOf('{{') > -1) {
+        logoutUrl = this.logoutUrl
+          .replace(/\{\{id_token\}\}/, encodeURIComponent(id_token))
+          .replace(/\{\{client_id\}\}/, encodeURIComponent(this.clientId));
+      } else {
+        let params = new HttpParams({ encoder: new WebHttpUrlEncodingCodec() });
+
+        if (id_token) {
+          params = params.set('id_token_hint', id_token);
         }
-      }
 
-      for (let key in customParameters) {
-        params = params.set(key, customParameters[key]);
-      }
+        const postLogoutUrl =
+          this.postLogoutRedirectUri ||
+          (this.redirectUriAsPostLogoutRedirectUriFallback &&
+            this.redirectUri) ||
+          '';
+        if (postLogoutUrl) {
+          params = params.set('post_logout_redirect_uri', postLogoutUrl);
 
-      logoutUrl =
-        this.logoutUrl +
-        (this.logoutUrl.indexOf('?') > -1 ? '&' : '?') +
-        params.toString();
-    }
-    this.config.openUri(logoutUrl);
+          if (state) {
+            params = params.set('state', state);
+          }
+        }
+
+        // @ts-ignore
+        // tslint:disable-next-line:forin
+        for (let key in customParameters) {
+          params = params.set(key, customParameters[key]);
+        }
+
+        logoutUrl =
+          this.logoutUrl +
+          (this.logoutUrl.indexOf('?') > -1 ? '&' : '?') +
+          params.toString();
+      }
+      this.config.openUri(logoutUrl);
+    });
   }
 
   /**
@@ -2655,6 +2698,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
         id = String.fromCharCode.apply(null, bytes);
       } else {
         while (0 < size--) {
+          // tslint:disable-next-line:no-bitwise
           id += unreserved[(Math.random() * unreserved.length) | 0];
         }
       }
@@ -2776,104 +2820,108 @@ export class OAuthService extends AuthConfig implements OnDestroy {
     ignoreCorsIssues = false
   ): Promise<any> {
     let revokeEndpoint = this.revocationEndpoint;
-    let accessToken = this.getAccessToken();
-    let refreshToken = this.getRefreshToken();
 
-    if (!accessToken) {
-      return;
-    }
-
-    let params = new HttpParams({ encoder: new WebHttpUrlEncodingCodec() });
-
-    let headers = new HttpHeaders().set(
-      'Content-Type',
-      'application/x-www-form-urlencoded'
-    );
-
-    if (this.useHttpBasicAuth) {
-      const header = btoa(`${this.clientId}:${this.dummyClientSecret}`);
-      headers = headers.set('Authorization', 'Basic ' + header);
-    }
-
-    if (!this.useHttpBasicAuth) {
-      params = params.set('client_id', this.clientId);
-    }
-
-    if (!this.useHttpBasicAuth && this.dummyClientSecret) {
-      params = params.set('client_secret', this.dummyClientSecret);
-    }
-
-    if (this.customQueryParams) {
-      for (const key of Object.getOwnPropertyNames(this.customQueryParams)) {
-        params = params.set(key, this.customQueryParams[key]);
-      }
-    }
-
-    return new Promise((resolve, reject) => {
-      let revokeAccessToken: Observable<void>;
-      let revokeRefreshToken: Observable<void>;
-
-      if (accessToken) {
-        let revokationParams = params
-          .set('token', accessToken)
-          .set('token_type_hint', 'access_token');
-        revokeAccessToken = this.http.post<void>(
-          revokeEndpoint,
-          revokationParams,
-          { headers }
-        );
-      } else {
-        revokeAccessToken = of(null);
-      }
-
-      if (refreshToken) {
-        let revokationParams = params
-          .set('token', refreshToken)
-          .set('token_type_hint', 'refresh_token');
-        revokeRefreshToken = this.http.post<void>(
-          revokeEndpoint,
-          revokationParams,
-          { headers }
-        );
-      } else {
-        revokeRefreshToken = of(null);
-      }
-
-      if (ignoreCorsIssues) {
-        revokeAccessToken = revokeAccessToken.pipe(
-          catchError((err: HttpErrorResponse) => {
-            if (err.status === 0) {
-              return of<void>(null);
-            }
-            return throwError(err);
-          })
-        );
-
-        revokeRefreshToken = revokeRefreshToken.pipe(
-          catchError((err: HttpErrorResponse) => {
-            if (err.status === 0) {
-              return of<void>(null);
-            }
-            return throwError(err);
-          })
-        );
-      }
-
-      combineLatest([revokeAccessToken, revokeRefreshToken]).subscribe(
-        (res) => {
-          this.logOut(customParameters);
-          resolve(res);
-          this.logger.info('Token successfully revoked');
-        },
-        (err) => {
-          this.logger.error('Error revoking token', err);
-          this.eventsSubject.next(
-            new OAuthErrorEvent('token_revoke_error', err)
-          );
-          reject(err);
+    return Promise.all([this.getAccessToken(), this.getRefreshToken()]).then(
+      ([accessToken, refreshToken]) => {
+        if (!accessToken) {
+          return;
         }
-      );
-    });
+
+        let params = new HttpParams({ encoder: new WebHttpUrlEncodingCodec() });
+
+        let headers = new HttpHeaders().set(
+          'Content-Type',
+          'application/x-www-form-urlencoded'
+        );
+
+        if (this.useHttpBasicAuth) {
+          const header = btoa(`${this.clientId}:${this.dummyClientSecret}`);
+          headers = headers.set('Authorization', 'Basic ' + header);
+        }
+
+        if (!this.useHttpBasicAuth) {
+          params = params.set('client_id', this.clientId);
+        }
+
+        if (!this.useHttpBasicAuth && this.dummyClientSecret) {
+          params = params.set('client_secret', this.dummyClientSecret);
+        }
+
+        if (this.customQueryParams) {
+          for (const key of Object.getOwnPropertyNames(
+            this.customQueryParams
+          )) {
+            params = params.set(key, this.customQueryParams[key]);
+          }
+        }
+
+        return new Promise((resolve, reject) => {
+          let revokeAccessToken: Observable<void>;
+          let revokeRefreshToken: Observable<void>;
+
+          if (accessToken) {
+            let revokationParams = params
+              .set('token', accessToken)
+              .set('token_type_hint', 'access_token');
+            revokeAccessToken = this.http.post<void>(
+              revokeEndpoint,
+              revokationParams,
+              { headers }
+            );
+          } else {
+            revokeAccessToken = of(null);
+          }
+
+          if (refreshToken) {
+            let revokationParams = params
+              .set('token', refreshToken)
+              .set('token_type_hint', 'refresh_token');
+            revokeRefreshToken = this.http.post<void>(
+              revokeEndpoint,
+              revokationParams,
+              { headers }
+            );
+          } else {
+            revokeRefreshToken = of(null);
+          }
+
+          if (ignoreCorsIssues) {
+            revokeAccessToken = revokeAccessToken.pipe(
+              catchError((err: HttpErrorResponse) => {
+                if (err.status === 0) {
+                  return of<void>(null);
+                }
+                return throwError(err);
+              })
+            );
+
+            revokeRefreshToken = revokeRefreshToken.pipe(
+              catchError((err: HttpErrorResponse) => {
+                if (err.status === 0) {
+                  return of<void>(null);
+                }
+                return throwError(err);
+              })
+            );
+          }
+
+          combineLatest([revokeAccessToken, revokeRefreshToken]).subscribe(
+            (res) => {
+              this.logOut(customParameters);
+              resolve(res);
+              this.logger.info('Token successfully revoked');
+            },
+            (err) => {
+              this.logger.error('Error revoking token', err);
+              this.eventsSubject.next(
+                new OAuthErrorEvent('token_revoke_error', err)
+              );
+              reject(err);
+            }
+          );
+        });
+      }
+    );
   }
 
   /**
@@ -2882,6 +2930,7 @@ export class OAuthService extends AuthConfig implements OnDestroy {
   private clearLocationHash() {
     // Checking for empty hash is necessary for Firefox
     // as setting an empty hash to an empty string adds # to the URL
+    // tslint:disable-next-line:triple-equals
     if (location.hash != '') {
       location.hash = '';
     }

@@ -5,8 +5,9 @@
   "scripts": {
     "release": "standard-version",
     "ng": "ng",
-    "start": "ng serve --project sample -o",
-    "build": "npm run prettier && ng build --configuration production --project lib && npm run copy:readme && npm run copy:license && npm run docs",
+    "start": "ng serve --project quickstart-demo -o",
+    "build": "npm run prettier && ng build --configuration production --project lib",
+    "build-locally": "npm run prettier && ng build --configuration production --project lib && cd ./dist/lib && npm link",
     "build:jwks": "npm run prettier && ng build angular-oauth2-oidc-jwks --ts-config tsconfig.npm.json && npm run copyfiles:jwks",
     "test": "ng test",
     "lint": "ng lint",
@@ -37,18 +38,14 @@
     "@angular/router": "13.0.1",
     "@popperjs/core": "^2.9.2",
     "@webcomponents/custom-elements": "^1.4.3",
-    "angular-oauth2-oidc": "^10.0.3",
-    "angular-oauth2-oidc-jwks": "^9.0.0",
     "base64-js": "^1.5.1",
     "bootstrap": "^3.4.1",
     "fast-sha256": "^1.3.0",
     "jsrsasign": "^10.3.0",
-    "ngx-semantic-version": "^2.3.0",
     "rxjs": "^6.5.3",
     "rxjs-compat": "^6.6.7",
     "text-encoder-lite": "^2.0.0",
-    "tsickle": "^0.43.0",
-    "tslib": "^2.3.0",
+    "tslib": "^2.0.0",
     "zone.js": "~0.11.4"
   },
   "devDependencies": {
@@ -85,7 +82,7 @@
     "standard-version": "^9.3.1",
     "ts-node": "~10.1.0",
     "tslint": "~6.1.0",
-    "typescript": "^4.4.4"
+    "typescript": "~4.4.4"
   },
   "husky": {
     "hooks": {

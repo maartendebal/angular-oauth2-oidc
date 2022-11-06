@@ -9,7 +9,7 @@
 
         <link rel="icon" type="image/x-icon" href="../images/favicon.ico">
 	   <link rel="stylesheet" href="../styles/style.css">
-        <link rel="stylesheet" href="../styles/dark.css" media="(prefers-color-scheme: dark)">
+        <link rel="stylesheet" href="../styles/dark.css">
     </head>
     <body>
 
@@ -30,6 +30,7 @@
                <!-- START CONTENT -->
                <div class="content class">
                    <div class="content-data">
+
 
 
 
@@ -164,6 +165,7 @@ through dependency injection.</p>
 
                     <div class="io-description">
                         <b>Parameters :</b>
+                        
                         <table class="params">
                             <thead>
                                 <tr>
@@ -235,8 +237,8 @@ through dependency injection.</p>
 
             <tr>
                 <td class="col-md-4">
-                    <div class="io-line">Defined in <a href="" data-line="88"
-                            class="link-to-prism">projects/lib/src/types.ts:88</a></div>
+                    <div class="io-line">Defined in <a href="" data-line="92"
+                            class="link-to-prism">projects/lib/src/types.ts:92</a></div>
                 </td>
             </tr>
 
@@ -246,6 +248,7 @@ through dependency injection.</p>
 
                     <div class="io-description">
                         <b>Parameters :</b>
+                        
                         <table class="params">
                             <thead>
                                 <tr>
@@ -317,8 +320,8 @@ through dependency injection.</p>
 
             <tr>
                 <td class="col-md-4">
-                    <div class="io-line">Defined in <a href="" data-line="85"
-                            class="link-to-prism">projects/lib/src/types.ts:85</a></div>
+                    <div class="io-line">Defined in <a href="" data-line="86"
+                            class="link-to-prism">projects/lib/src/types.ts:86</a></div>
                 </td>
             </tr>
 
@@ -328,6 +331,7 @@ through dependency injection.</p>
 
                     <div class="io-description">
                         <b>Parameters :</b>
+                        
                         <table class="params">
                             <thead>
                                 <tr>
@@ -399,8 +403,8 @@ through dependency injection.</p>
 
             <tr>
                 <td class="col-md-4">
-                    <div class="io-line">Defined in <a href="" data-line="86"
-                            class="link-to-prism">projects/lib/src/types.ts:86</a></div>
+                    <div class="io-line">Defined in <a href="" data-line="88"
+                            class="link-to-prism">projects/lib/src/types.ts:88</a></div>
                 </td>
             </tr>
 
@@ -410,6 +414,7 @@ through dependency injection.</p>
 
                     <div class="io-description">
                         <b>Parameters :</b>
+                        
                         <table class="params">
                             <thead>
                                 <tr>
@@ -481,8 +486,8 @@ through dependency injection.</p>
 
             <tr>
                 <td class="col-md-4">
-                    <div class="io-line">Defined in <a href="" data-line="87"
-                            class="link-to-prism">projects/lib/src/types.ts:87</a></div>
+                    <div class="io-line">Defined in <a href="" data-line="90"
+                            class="link-to-prism">projects/lib/src/types.ts:90</a></div>
                 </td>
             </tr>
 
@@ -492,6 +497,7 @@ through dependency injection.</p>
 
                     <div class="io-description">
                         <b>Parameters :</b>
+                        
                         <table class="params">
                             <thead>
                                 <tr>
@@ -635,9 +641,13 @@ export class LoginOptions {
  */
 export abstract class OAuthLogger {
   abstract debug(message?: any, ...optionalParams: any[]): void;
+
   abstract info(message?: any, ...optionalParams: any[]): void;
+
   abstract log(message?: any, ...optionalParams: any[]): void;
+
   abstract warn(message?: any, ...optionalParams: any[]): void;
+
   abstract error(message?: any, ...optionalParams: any[]): void;
 }
 
@@ -651,6 +661,12 @@ export abstract class OAuthStorage {
   abstract getItem(key: string): string | null;
   abstract removeItem(key: string): void;
   abstract setItem(key: string, data: string): void;
+}
+
+export abstract class OAuthSecureStorage {
+  abstract getItem(key: string): Promise&lt;string | null&gt;;
+  abstract setItem(key: string, data: string): void;
+  abstract removeItem(key: string): void;
 }
 
 @Injectable()
@@ -713,6 +729,7 @@ export interface TokenResponse {
  */
 export interface UserInfo {
   sub: string;
+
   [key: string]: any;
 }
 
@@ -757,14 +774,15 @@ export interface OidcDiscoveryDoc {
 
 
 
-                   
+
+
 
 
 
 
                    </div><div class="search-results">
     <div class="has-results">
-        <h1 class="search-results-title"><span class='search-results-count'></span> result-matching "<span class='search-query'></span>"</h1>
+        <h1 class="search-results-title"><span class='search-results-count'></span> results matching "<span class='search-query'></span>"</h1>
         <ul class="search-results-list"></ul>
     </div>
     <div class="no-results">
@@ -776,6 +794,15 @@ export interface OidcDiscoveryDoc {
            </div>
        </div>
 
+          <label class="dark-mode-switch">
+               <input type="checkbox">
+               <span class="slider">
+                    <svg class="slider-icon" viewBox="0 0 24 24" fill="none" height="20" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" width="20" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"></path>
+                    </svg>
+               </span>
+          </label>
+
        <script>
             var COMPODOC_CURRENT_PAGE_DEPTH = 1;
             var COMPODOC_CURRENT_PAGE_CONTEXT = 'class';
@@ -785,8 +812,8 @@ export interface OidcDiscoveryDoc {
 
        <script src="../js/libs/custom-elements.min.js"></script>
        <script src="../js/libs/lit-html.js"></script>
-       
-       <script type="module" src="../js/menu-wc.js" defer></script>
+
+       <script src="../js/menu-wc.js" defer></script>
        <script nomodule src="../js/menu-wc_es5.js" defer></script>
 
        <script src="../js/libs/bootstrap-native.js"></script>
